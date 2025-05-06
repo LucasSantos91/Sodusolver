@@ -1,0 +1,12 @@
+.{
+    .name = .Sodusolver,
+    .version = "0.0.0",
+    .fingerprint = 0xc95b06dd4d351018, 
+    .minimum_zig_version = "0.15.0-dev.465+bb79c85cb",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
