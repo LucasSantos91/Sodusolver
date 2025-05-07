@@ -52,22 +52,23 @@ const Cell = struct {
         };
 
         if (comptime short_mode) {
-            const text = switch (self.status()) {
-                .ok => " ",
-                .invalid => "*",
-                .complete => &[1]u8{@as(u8, '1') + self.getValue()},
+            const text: u8 = switch (self.status()) {
+                .ok => ' ',
+                .invalid => '*',
+                .complete => @as(u8, '1') + self.getValue(),
             };
-            try writer.writeAll(text);
+            try writer.writeByte(text);
         } else {
             if (self.status() == .invalid) {
                 try writer.writeAll(" invalid ");
                 return;
             }
             for (0..digit_count) |index| {
-                if (self.possible.isSet(index))
-                    try std.fmt.format(writer, "{}", .{index + 1})
+                const char = if (self.possible.isSet(index))
+                    @as(u8, @intCast(index)) + '1'
                 else
-                    try writer.writeAll(" ");
+                    ' ';
+                try writer.writeByte(char);
             }
         }
     }
@@ -206,7 +207,7 @@ const Grid = struct {
             .invalid => .invalid,
         };
     }
-    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = options; // autofix
         const short_mode = comptime blk: {
             if (fmt.len == 0) break :blk true;
@@ -244,13 +245,21 @@ const Grid = struct {
             fn writeRowCell(w: anytype, cell: Cell, sep: u8) !void {
                 try std.fmt.format(w, "{" ++ fmt ++ "}{c}", .{ cell, sep });
             }
-            fn writeRow(w: anytype, cells: *const [digit_count]Cell, row: u8) !void {
+            fn writeRowSquare(w: anytype, g: *const Grid, square_starting_index: CellIndex) !void {
+                const last_offset = square_side - 1;
+                for (0..last_offset) |cell_index| {
+                    try writeRowCell(w, g.cells[square_starting_index + cell_index], '|');
+                }
+                try writeRowCell(w, g.cells[square_starting_index + last_offset], '*');
+            }
+
+            fn writeRow(w: anytype, g: *const Grid, row: Cell.Digit) !void {
                 try writeRowCaption(w, row);
+                const row_starting_index = @as(CellIndex, row) * digit_count;
                 for (0..square_side) |square_index| {
-                    for (0..square_side - 1) |cell_index| {
-                        try writeRowCell(w, cells[square_index * square_side + cell_index], '|');
-                    }
-                    try writeRowCell(w, cells[digit_count - 1], '*');
+                    const offset: CellIndex = @intCast(square_index * square_side);
+                    const square_starting_index = row_starting_index + offset;
+                    try writeRowSquare(w, g, square_starting_index);
                 }
                 try w.writeAll("\n");
             }
@@ -261,13 +270,14 @@ const Grid = struct {
         for (0..square_side) |square_row| {
             try writer.writeAll(square_separator);
             const base_row: Digit = @intCast(square_row * square_side);
-            for (0..square_side - 1) |inner_row| {
+            const last_offset = square_side - 1;
+            for (0..last_offset) |inner_row| {
                 const row: Digit = @intCast(base_row + inner_row);
-                try writeRow(writer, self.cells[@as(CellIndex, row) * digit_count ..][0..digit_count], row);
+                try writeRow(writer, self, row);
                 try writer.writeAll(row_separator);
             }
-            const row = base_row + square_side - 1;
-            try writeRow(writer, self.cells[@as(CellIndex, row) * digit_count ..][0..digit_count], row);
+            const row = base_row + last_offset;
+            try writeRow(writer, self, row);
         }
         try writer.writeAll(square_separator);
     }
@@ -296,14 +306,20 @@ const GridChain = struct {
         var guess: [*]Guess = self.guesses[0..].ptr;
         guess[0].grid = initial;
         const limit: [*]const Guess = guess;
+        const logger = std.log.scoped(.grid_guessing);
 
         grid_loop: while (true) {
             const source_grid = &guess[0];
+            logger.info("Current grid:\n{}", .{source_grid.grid});
             const guess_grid = &guess[1];
             cell_loop: while (true) {
                 source_grid.cell_index = findNextGuess(source_grid.grid) orelse
                     // Everything is complete
                     return source_grid.grid;
+                logger.info(
+                    "Evaluating cell: {}({})",
+                    .{ Grid.Coord.fromIndex(source_grid.cell_index), source_grid.cell_index },
+                );
                 const cell = &source_grid.grid.cells[source_grid.cell_index];
                 source_grid.digit = @intCast(cell.possible.findFirstSet().?);
                 guess_loop: while (true) {
@@ -465,7 +481,7 @@ fn applyClues(initial_grid: Grid) GridChain.GridError!Grid {
                 .invalid => "invalid",
             },
         });
-        logger.debug("{e}", .{result});
+        logger.debug("\n{e}", .{result});
         switch (status) {
             .ok => {},
             .invalid => return GridChain.GridError.InvalidGrid,
