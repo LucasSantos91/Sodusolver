@@ -92,10 +92,24 @@ const Grid = struct {
     pub const Coord = struct {
         row: Digit,
         column: Digit,
+
+        pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+            _ = fmt; // autofix
+            _ = options; // autofix
+            try std.fmt.format(writer, "{c}{c}", .{ @as(u8, self.row) + 'A', @as(u8, self.column) + '1' });
+        }
+
+        pub fn toIndex(self: @This()) CellIndex {
+            return @as(CellIndex, self.row) * digit_count + self.column;
+        }
+        pub fn fromIndex(index: CellIndex) @This() {
+            return .{
+                .row = @intCast(index / digit_count),
+                .column = @intCast(index % digit_count),
+            };
+        }
     };
-    fn coordToIndex(coord: Coord) CellIndex {
-        return @as(CellIndex, coord.row) * digit_count + coord.column;
-    }
+
     const Status = enum {
         ok,
         invalid,
@@ -109,7 +123,7 @@ const Grid = struct {
         return false;
     }
     fn ruleOutRow(self: *@This(), row: Digit, digit: Digit, complete: *CellSet) Status {
-        const offset = coordToIndex(.{ .row = row, .column = 0 });
+        const offset = (Grid.Coord{ .row = row, .column = 0 }).toIndex();
         for (offset..offset + digit_count) |index| {
             if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
                 return .invalid;
@@ -118,14 +132,14 @@ const Grid = struct {
     }
     fn ruleOutColumn(self: *@This(), column: Digit, digit: Digit, complete: *CellSet) Status {
         for (0..digit_count) |n| {
-            const index = coordToIndex(.{ .row = @intCast(n), .column = column });
+            const index = (Grid.Coord{ .row = @intCast(n), .column = column }).toIndex();
             if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
                 return .invalid;
         }
         return .ok;
     }
     fn ruleOutSquare(self: *@This(), row: SquareIndex, column: SquareIndex, digit: Digit, complete: *CellSet) Status {
-        var index = coordToIndex(.{ .row = row, .column = column }) * square_side;
+        var index = (Grid.Coord.toIndex(.{ .row = row, .column = column })) * square_side;
         for (0..square_side) |_| {
             for (0..square_side) |_| {
                 if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
@@ -180,8 +194,7 @@ const Grid = struct {
         return self.propagate(index);
     }
     pub fn setWithCoord(self: *@This(), coord: Coord, digit: Digit) Status {
-        const index = coordToIndex(coord);
-        return self.set(index, digit);
+        return self.set(coord.toIndex(), digit);
     }
     pub fn ruleOut(self: *@This(), index: CellIndex, digit: Digit) Status {
         return switch (self.cells[index].ruleOut(digit)) {
@@ -220,7 +233,6 @@ const Grid = struct {
             }
             try writer.writeAll("\n");
         }
-        const separator = " " ++ "*" ** (cell_len * digit_count + 1) ++ "\n";
         const writeRow = struct {
             fn writeRowCaption(w: anytype, row: u8) !void {
                 try std.fmt.format(
@@ -244,14 +256,20 @@ const Grid = struct {
             }
         }.writeRow;
 
+        const square_separator = " " ++ "*" ** (cell_len * digit_count + 1) ++ "\n";
+        const row_separator = " " ++ "-" ** (cell_len * digit_count + 1) ++ "\n";
         for (0..square_side) |square_row| {
-            try writer.writeAll(separator);
-            for (0..square_side) |inner_row| {
-                const row: Digit = @intCast(square_row * square_side + inner_row);
+            try writer.writeAll(square_separator);
+            const base_row: Digit = @intCast(square_row * square_side);
+            for (0..square_side - 1) |inner_row| {
+                const row: Digit = @intCast(base_row + inner_row);
                 try writeRow(writer, self.cells[@as(CellIndex, row) * digit_count ..][0..digit_count], row);
+                try writer.writeAll(row_separator);
             }
+            const row = base_row + square_side - 1;
+            try writeRow(writer, self.cells[@as(CellIndex, row) * digit_count ..][0..digit_count], row);
         }
-        try writer.writeAll(separator);
+        try writer.writeAll(square_separator);
     }
 };
 
@@ -360,8 +378,13 @@ const Clue = struct {
 
     const ClueError = error{ UnexpectedEnd, InvalidColumn } || RowError || DigitError;
     pub fn parse(reader: anytype) (ClueError || @TypeOf(reader).Error)!?Clue {
-        const err = std.log.err;
-        const row_letter = try readOneNonWhitespace(reader) orelse return null;
+        const logger = std.log.scoped(.parsing_clues);
+        const err = logger.err;
+        logger.debug("Beginning to parse clue", .{});
+        const row_letter = try readOneNonWhitespace(reader) orelse {
+            logger.info("Reached end of clues", .{});
+            return null;
+        };
         const row = parseRow(row_letter) catch |e| {
             if (e == error.InvalidRow)
                 err("Invalid row given at clue \"{c}\"", .{row_letter});
@@ -386,27 +409,71 @@ const Clue = struct {
                 err("Invalid digit at clue \"{c}{c}{c}\"", .{ row_letter, column_digit, digit_char });
             return e;
         };
-        return .{
+        const result: Clue = .{
             .cell = .{ .row = row, .column = column },
             .digit = digit,
         };
+        logger.debug("Parsed clue: {}", .{result});
+        return result;
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt; // autofix
+        _ = options; // autofix
+        try std.fmt.format(writer, "{}:{c}", .{ self.cell, @as(u8, self.digit) + '1' });
     }
 };
 
-fn setInitialGrid() !Grid {
+const DoubledClueError = error{
+    DoubledClue,
+};
+fn parseInitialGrid() (std.fs.File.ReadError || Clue.ClueError || DoubledClueError)!Grid {
     const stdin = std.io.getStdIn();
     var buffered_stdin = std.io.bufferedReader(stdin.reader());
     const reader = buffered_stdin.reader();
     var result: Grid = .{};
+    const logger = std.log.scoped(.initial_grid_parsing);
+    logger.info("Parsing clues", .{});
     while (try Clue.parse(reader)) |clue| {
-        switch (result.setWithCoord(clue.cell, clue.digit)) {
-            .ok => {},
-            .invalid => return error.InvalidGrid,
+        logger.info("Got clue: {}", .{clue});
+        const index = clue.cell.toIndex();
+        const cell = &result.cells[index];
+        if (cell.isComplete()) {
+            logger.err("Doubled clue for {}", .{clue.cell});
+            return DoubledClueError.DoubledClue;
         }
+        cell.set(clue.digit);
+        result.complete.set(index);
+        logger.debug("Current grid state:\n{}", .{result});
     }
+    logger.info("Finished parsing initial grid:\n{}", .{result});
     return result;
 }
 
+fn applyClues(initial_grid: Grid) GridChain.GridError!Grid {
+    var result: Grid = .{};
+    var it = initial_grid.complete.iterator(.{ .kind = .set });
+    const logger = std.log.scoped(.initial_grid_processing);
+    logger.info("Starting processing of initial grid:\n{}", .{initial_grid});
+    while (it.next()) |index| {
+        const digit = initial_grid.cells[index].getValue();
+        const status = result.set(@intCast(index), digit);
+        logger.info("Applying clue: {} -- status: {s}", .{
+            Clue{ .cell = Grid.Coord.fromIndex(@intCast(index)), .digit = digit },
+            switch (status) {
+                .ok => "success",
+                .invalid => "invalid",
+            },
+        });
+        logger.debug("{e}", .{result});
+        switch (status) {
+            .ok => {},
+            .invalid => return GridChain.GridError.InvalidGrid,
+        }
+    }
+    logger.info("Finished processing initial grid:\n{e}", .{result});
+    return result;
+}
 pub fn main() !void {
     const stdout = std.io.getStdOut();
     const example_grid = comptime blk: {
@@ -420,15 +487,15 @@ pub fn main() !void {
     var buffered_stdout = std.io.bufferedWriter(stdout.writer());
     defer buffered_stdout.flush() catch {};
     const writer = buffered_stdout.writer();
-    const initial_grid = setInitialGrid() catch |err| {
+    const initial_grid = try parseInitialGrid();
+    try std.fmt.format(writer, "Given grid:\n{}\n", .{initial_grid});
+    const validated_grid = applyClues(initial_grid) catch |err| {
         switch (err) {
-            error.InvalidGrid => try writer.writeAll("\nNo solution for this grid."),
-            else => {},
+            GridChain.GridError.InvalidGrid => try writer.writeAll("\nNo solution for this grid."),
         }
         return err;
     };
-    try std.fmt.format(writer, "Given grid:\n{}\n", .{initial_grid});
-    const final_grid = GridChain.compute(initial_grid) catch {
+    const final_grid = GridChain.compute(validated_grid) catch {
         try std.fmt.format(writer, "There is no solution.", .{});
         return;
     };
