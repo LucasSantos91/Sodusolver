@@ -302,8 +302,17 @@ const GridChain = struct {
     const GridError = error{InvalidGrid};
     fn findNextGuess(grid: Grid) ?Grid.CellIndex {
         var it = grid.complete.iterator(.{ .kind = .unset });
-        const result = it.next() orelse return null;
-        return @intCast(result);
+        var best_index: Grid.CellIndex = @intCast(it.next() orelse return null);
+        var best_count = grid.cells[best_index].count();
+        while (it.next()) |next_index| {
+            const next_count = grid.cells[next_index].count();
+            if (next_count < best_count) {
+                best_index = @intCast(next_index);
+                best_count = next_count;
+            }
+        }
+
+        return best_index;
     }
     pub fn compute(initial: Grid) GridError!Grid {
         var self: @This() = undefined;
