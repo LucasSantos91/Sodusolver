@@ -42,14 +42,33 @@ const Cell = struct {
     }
 
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt; // autofix
         _ = options; // autofix
-        if (self.status() == .invalid) try writer.writeAll(" invalid ");
-        for (0..digit_count) |index| {
-            if (self.possible.isSet(index))
-                try std.fmt.format(writer, "{}", .{index + 1})
-            else
-                try writer.writeAll(" ");
+        const short_mode = comptime blk: {
+            if (fmt.len == 0) break :blk true;
+            const show_possibilities = std.mem.eql(u8, fmt, "e");
+            const short_mode = std.mem.eql(u8, fmt, "s");
+            if (!show_possibilities and !short_mode) @compileError("Unknown format option: " ++ fmt);
+            break :blk short_mode;
+        };
+
+        if (comptime short_mode) {
+            const text = switch (self.status()) {
+                .ok => " ",
+                .invalid => "*",
+                .complete => &[1]u8{@as(u8, '1') + self.getValue()},
+            };
+            try writer.writeAll(text);
+        } else {
+            if (self.status() == .invalid) {
+                try writer.writeAll(" invalid ");
+                return;
+            }
+            for (0..digit_count) |index| {
+                if (self.possible.isSet(index))
+                    try std.fmt.format(writer, "{}", .{index + 1})
+                else
+                    try writer.writeAll(" ");
+            }
         }
     }
 };
@@ -118,7 +137,7 @@ const Grid = struct {
         return .ok;
     }
 
-    pub fn propagate(self: *@This(), index_arg: CellIndex) Status {
+    fn propagate(self: *@This(), index_arg: CellIndex) Status {
         var pending: CellSet = .initEmpty();
         var index = index_arg;
         while (true) {
@@ -148,61 +167,162 @@ const Grid = struct {
         }
     }
 
-    pub fn mark(self: *@This(), coord: Coord, digit: Digit) Status {
-        const index = coordToIndex(coord);
+    pub fn isComplete(self: *const @This()) bool {
+        for (self.cells) |cell| {
+            if (!cell.isComplete()) return false;
+        }
+        return true;
+    }
+
+    pub fn set(self: *@This(), index: CellIndex, digit: Digit) Status {
         self.cells[index].set(digit);
         self.complete.set(index);
         return self.propagate(index);
     }
-
+    pub fn setWithCoord(self: *@This(), coord: Coord, digit: Digit) Status {
+        const index = coordToIndex(coord);
+        return self.set(index, digit);
+    }
+    pub fn ruleOut(self: *@This(), index: CellIndex, digit: Digit) Status {
+        return switch (self.cells[index].ruleOut(digit)) {
+            .ok => .ok,
+            .complete => blk: {
+                self.complete.set(index);
+                break :blk self.propagate(index);
+            },
+            .invalid => .invalid,
+        };
+    }
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt; // autofix
         _ = options; // autofix
+        const short_mode = comptime blk: {
+            if (fmt.len == 0) break :blk true;
+            const show_possibilities = std.mem.eql(u8, fmt, "e");
+            const short_mode = std.mem.eql(u8, fmt, "s");
+            if (!show_possibilities and !short_mode) @compileError("Unknown format option: " ++ fmt);
+            break :blk short_mode;
+        };
 
-        try writer.writeAll(" ");
-        const offset = (digit_count + 1) / 2;
-        const pad = " " ** offset;
-        var i: u8 = 1;
-        for (0..square_side) |_| {
-            try writer.writeAll(" ");
-            for (0..square_side) |_| {
-                try writer.writeAll(pad);
-                try std.fmt.format(writer, "{}", .{i});
-                try writer.writeAll(pad[0 .. pad.len - 1]);
+        const inner_cell_len = if (comptime short_mode) 1 else digit_count;
+        const column_text_size = 1;
+        const row_text_size = 1;
+        const cell_len = inner_cell_len + column_text_size;
+
+        {
+            const pad_left = @divFloor(inner_cell_len, 2);
+            const pad_right = inner_cell_len - pad_left;
+            var i: u8 = 1;
+            try writer.writeAll(" " ** (row_text_size + 1));
+            for (0..digit_count) |_| {
+                const text = " " ** pad_left ++ "{}" ++ " " ** pad_right;
+                try std.fmt.format(writer, text, .{i});
                 i += 1;
             }
+            try writer.writeAll("\n");
         }
-        try writer.writeAll("\n");
-        const separator = " " ++ "-" ** ((digit_count + 1) * digit_count + 2 + square_side) ++ "\n";
-        var index: CellIndex = 0;
-        var row: u8 = 0;
-        for (0..square_side) |_| {
-            try writer.writeAll(separator);
-            for (0..square_side) |_| {
-                try std.fmt.format(writer, separator ++ "{c}", .{@as(u8, @intCast('A' + row))});
-                for (0..square_side) |_| {
-                    try writer.writeAll("|");
-                    for (0..square_side) |_| {
-                        try std.fmt.format(writer, "|{}", .{self.cells[index]});
-                        index += 1;
+        const separator = " " ++ "*" ** (cell_len * digit_count) ++ "\n";
+        const writeRow = struct {
+            fn writeRowCaption(w: anytype, row: u8) !void {
+                try std.fmt.format(
+                    w,
+                    "{c}*",
+                    .{@as(u8, @intCast('A' + row))},
+                );
+            }
+            fn writeRowCell(w: anytype, cell: Cell, sep: u8) !void {
+                try std.fmt.format(w, "{" ++ fmt ++ "}{c}", .{ cell, sep });
+            }
+            fn writeRow(w: anytype, cells: *const [digit_count]Cell, row: u8) !void {
+                try writeRowCaption(w, row);
+                for (0..square_side) |square_index| {
+                    for (0..square_side - 1) |cell_index| {
+                        try writeRowCell(w, cells[square_index * square_side + cell_index], '|');
                     }
+                    try writeRowCell(w, cells[digit_count - 1], '*');
                 }
-                try writer.writeAll("||\n");
-                row += 1;
+                try w.writeAll("\n");
+            }
+        }.writeRow;
+
+        for (0..square_side) |square_row| {
+            try writer.writeAll(separator);
+            for (0..square_side) |inner_row| {
+                const row: Digit = @intCast(square_row * square_side + inner_row);
+                try writeRow(writer, self.cells[@as(CellIndex, row) * digit_count ..][0..digit_count], row);
             }
         }
-        try writer.writeAll(separator ++ separator);
+        try writer.writeAll(separator);
     }
 };
 
-const Guess = struct {
-    const CellIndex = Grid.CellIndex;
-    grid: Grid,
-    cell: CellIndex,
+const GridChain = struct {
+    const Guess = struct {
+        grid: Grid,
+        cell_index: Grid.CellIndex,
+        digit: Cell.Digit,
+
+        pub fn ruleOut(self: *@This()) Grid.Status {
+            return self.grid.ruleOut(self.cell_index, self.digit);
+        }
+    };
+    guesses: [Grid.cell_count]Guess,
+
+    const GridError = error{InvalidGrid};
+    fn findNextGuess(grid: Grid) ?Grid.CellIndex {
+        var it = grid.complete.iterator(.{ .kind = .unset });
+        return @intCast(it.next());
+    }
+    pub fn compute(initial: Grid) GridError!Grid {
+        var self: @This() = undefined;
+        var guess: [*]Guess = self.guesses[0..].ptr;
+        guess[0].grid = initial;
+        const limit: [*]const Guess = guess;
+
+        grid_loop: while (true) {
+            const source_grid = &guess[0];
+            const guess_grid = &guess[1];
+            cell_loop: while (true) {
+                source_grid.cell_index = findNextGuess(source_grid.grid) orelse
+                    // Everything is complete
+                    return source_grid.grid;
+                const cell = &source_grid.grid.cells[source_grid.cell_index];
+                source_grid.digit = cell.possible.findFirstSet().?;
+                guess_loop: while (true) {
+                    guess_grid.grid = source_grid.grid;
+                    switch (guess_grid.grid.set(source_grid.cell_index, source_grid.digit)) {
+                        .invalid => {
+                            switch (source_grid.ruleOut()) {
+                                .ok => {
+                                    source_grid.digit = cell.possible.findFirstSet() orelse continue :cell_loop;
+                                    continue :guess_loop;
+                                },
+                                .invalid => {
+                                    // Backtrack
+                                    while (guess != limit) {
+                                        guess -= 1;
+                                        const previous_grid = &guess[0];
+                                        switch (previous_grid.ruleOut()) {
+                                            .ok => continue :grid_loop,
+                                            .invalid => {},
+                                        }
+                                    }
+                                    return GridError.InvalidGrid;
+                                },
+                            }
+                        },
+                        .ok => {
+                            guess += 1;
+                            continue :grid_loop;
+                        },
+                    }
+                }
+            }
+        }
+    }
 };
 
 const Clue = struct {
-    cell: Grid.CellIndex,
+    cell: Grid.Coord,
     digit: Cell.Digit,
 
     fn readByte(reader: anytype) !?u8 {
@@ -211,7 +331,7 @@ const Clue = struct {
         return if (count == 0) null else char[0];
     }
     fn isWhitespace(c: u8) bool {
-        return c < 0x20;
+        return c <= 0x20;
     }
     fn readOneNonWhitespace(reader: anytype) !?u8 {
         while (true) {
@@ -231,42 +351,76 @@ const Clue = struct {
 
     const DigitError = error{InvalidDigit};
     fn parseDigit(num: u8) DigitError!Cell.Digit {
-        if (num >= '1' and num < '1' + Cell.last_digit)
+        if (num >= '1' and num <= '1' + Cell.last_digit)
             return @intCast(num - '1');
         return DigitError.InvalidDigit;
     }
 
     const ClueError = error{ UnexpectedEnd, InvalidColumn } || RowError || DigitError;
-    fn ParseClue(reader: anytype) ClueError!?Clue {
+    pub fn parse(reader: anytype) (ClueError || @TypeOf(reader).Error)!?Clue {
+        const err = std.log.err;
         const row_letter = try readOneNonWhitespace(reader) orelse return null;
-        const row = try parseRow(row_letter);
-        const column_digit = try readByte(reader) orelse return ClueError.UnexpectedEnd;
-        const column = parseDigit(column_digit) catch |err| return if (err == DigitError.InvalidDigit)
-            ClueError.InvalidColumn
-        else
-            err;
-        const digit_char = try readByte(reader) orelse return ClueError.UnexpectedEnd;
-        const digit = try parseDigit(digit_char);
+        const row = parseRow(row_letter) catch |e| {
+            if (e == error.InvalidRow)
+                err("Invalid row given at clue \"{c}\"", .{row_letter});
+            return e;
+        };
+        const column_digit = try readByte(reader) orelse {
+            err("Unexpected end at clue \"{c}\"", .{row_letter});
+            return ClueError.UnexpectedEnd;
+        };
+        const column = parseDigit(column_digit) catch |e| {
+            if (e == DigitError.InvalidDigit) {
+                err("Invalid column given at clue \"{c}{c}\"", .{ row_letter, column_digit });
+                return ClueError.InvalidColumn;
+            } else return e;
+        };
+        const digit_char = try readByte(reader) orelse {
+            err("Unexpected end at clue \"{c}{c}\"", .{ row_letter, column_digit });
+            return ClueError.UnexpectedEnd;
+        };
+        const digit = parseDigit(digit_char) catch |e| {
+            if (e == error.InvalidDigit)
+                err("Invalid digit at clue \"{c}{c}{c}\"", .{ row_letter, column_digit, digit_char });
+            return e;
+        };
         return .{
-            .cell = Grid.rowColToIndex(row, column),
+            .cell = .{ .row = row, .column = column },
             .digit = digit,
         };
     }
 };
 
-fn setInitialGrid() void {
+fn setInitialGrid() !Grid {
     const stdin = std.io.getStdIn();
     var buffered_stdin = std.io.bufferedReader(stdin.reader());
     const reader = buffered_stdin.reader();
-    _ = reader; // autofix
+    var result: Grid = .{};
+    while (try Clue.parse(reader)) |clue| {
+        switch (result.setWithCoord(clue.cell, clue.digit)) {
+            .ok => {},
+            .invalid => return error.InvalidGrid,
+        }
+    }
+    return result;
 }
+
 pub fn main() !void {
-    var a: Grid = .{};
-    for ([_]u8{ 0, 3, 5 }) |i| a.cells[30].possible.unset(i);
-    _ = a.mark(.{ .row = 1, .column = 3 }, 4);
     const stdout = std.io.getStdOut();
-    var buffered = std.io.bufferedWriter(stdout.writer());
-    const writer = buffered.writer();
-    try std.fmt.format(writer, "{}", .{a});
-    try buffered.flush();
+    var buffered_stdout = std.io.bufferedWriter(stdout.writer());
+    defer buffered_stdout.flush() catch {};
+    const writer = buffered_stdout.writer();
+    const initial_grid = setInitialGrid() catch |err| {
+        switch (err) {
+            error.InvalidGrid => try writer.writeAll("\nNo solution for this grid."),
+            else => {},
+        }
+        return err;
+    };
+    try std.fmt.format(writer, "Given grid:\n{}\n", .{initial_grid});
+    const final_grid = GridChain.compute() catch {
+        try std.fmt.format(writer, "There is no solution.", .{initial_grid});
+        return;
+    };
+    try std.fmt.format(writer, "The solution is:\n{}", .{final_grid});
 }
