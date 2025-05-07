@@ -14,7 +14,7 @@ const Cell = struct {
     }
     pub fn set(self: *@This(), digit: Digit) void {
         self.possible = .initEmpty();
-        self.possible.set(@intFromEnum(digit));
+        self.possible.set(digit);
     }
 
     pub const Status = enum {
@@ -22,9 +22,9 @@ const Cell = struct {
         complete,
         invalid,
     };
-    pub fn status(self: *@This()) Status {
+    pub fn status(self: @This()) Status {
         return switch (std.math.order(self.count(), 1)) {
-            .ls => .invalid,
+            .lt => .invalid,
             .eq => .complete,
             .gt => .ok,
         };
@@ -38,7 +38,19 @@ const Cell = struct {
     }
     pub fn getValue(self: @This()) Digit {
         std.debug.assert(self.isComplete());
-        return self.possible.findFirstSet().?;
+        return @intCast(self.possible.findFirstSet().?);
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt; // autofix
+        _ = options; // autofix
+        if (self.status() == .invalid) try writer.writeAll(" invalid ");
+        for (0..digit_count) |index| {
+            if (self.possible.isSet(index))
+                try std.fmt.format(writer, "{}", .{index + 1})
+            else
+                try writer.writeAll(" ");
+        }
     }
 };
 
@@ -50,15 +62,22 @@ const Grid = struct {
     const last_cell_index = cell_count - 1;
     const CellIndex = std.math.IntFittingRange(0, last_cell_index);
     const DigitSet = Cell.DigitSet;
-    const square_side = @sqrt(digit_count);
+    const square_side = std.math.sqrt(digit_count);
     const last_square_index = square_side - 1;
     const SquareIndex = std.math.IntFittingRange(0, last_square_index);
     const CellSet = std.StaticBitSet(cell_count);
 
-    cells: [cell_count]Cell = .{} ** cell_count,
+    cells: [cell_count]Cell = .{Cell{}} ** cell_count,
     complete: CellSet = .initEmpty(),
 
-    const RuleOutResult = enum {
+    pub const Coord = struct {
+        row: Digit,
+        column: Digit,
+    };
+    fn coordToIndex(coord: Coord) CellIndex {
+        return @as(CellIndex, coord.row) * digit_count + coord.column;
+    }
+    const Status = enum {
         ok,
         invalid,
     };
@@ -70,24 +89,24 @@ const Grid = struct {
         }
         return false;
     }
-    fn ruleOutRow(self: *@This(), row: Digit, digit: Digit, complete: *CellSet) RuleOutResult {
-        const offset = @as(CellCount, row) * digit_count;
+    fn ruleOutRow(self: *@This(), row: Digit, digit: Digit, complete: *CellSet) Status {
+        const offset = coordToIndex(.{ .row = row, .column = 0 });
         for (offset..offset + digit_count) |index| {
             if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
                 return .invalid;
         }
         return .ok;
     }
-    fn ruleOutColumn(self: *@This(), column: Digit, digit: Digit, complete: *CellSet) RuleOutResult {
+    fn ruleOutColumn(self: *@This(), column: Digit, digit: Digit, complete: *CellSet) Status {
         for (0..digit_count) |n| {
-            const index = n * digit_count + column;
+            const index = coordToIndex(.{ .row = @intCast(n), .column = column });
             if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
                 return .invalid;
         }
         return .ok;
     }
-    fn ruleOutSquare(self: *@This(), row: SquareIndex, column: SquareIndex, digit: Digit, complete: *CellSet) RuleOutResult {
-        var index = (@as(CellCount, row) * digit_count + column) * square_side;
+    fn ruleOutSquare(self: *@This(), row: SquareIndex, column: SquareIndex, digit: Digit, complete: *CellSet) Status {
+        var index = coordToIndex(.{ .row = row, .column = column }) * square_side;
         for (0..square_side) |_| {
             for (0..square_side) |_| {
                 if (self.ruleOutAndCheckIfInvalid(@intCast(index), digit, complete))
@@ -99,7 +118,7 @@ const Grid = struct {
         return .ok;
     }
 
-    pub fn ruleOut(self: *@This(), index_arg: CellIndex) RuleOutResult {
+    pub fn propagate(self: *@This(), index_arg: CellIndex) Status {
         var pending: CellSet = .initEmpty();
         var index = index_arg;
         while (true) {
@@ -110,11 +129,16 @@ const Grid = struct {
             const backup = cell.*;
             cell.* = .{};
 
-            const row = index / digit_count;
-            const column = index % digit_count;
+            const row: Digit = @intCast(index / digit_count);
+            const column: Digit = @intCast(index % digit_count);
             if (self.ruleOutRow(row, digit, &pending) == .invalid) return .invalid;
             if (self.ruleOutColumn(column, digit, &pending) == .invalid) return .invalid;
-            if (self.ruleOutSquare(row / square_side, column / square_side, digit, &pending) == .invalid) return .invalid;
+            if (self.ruleOutSquare(
+                @intCast(row / square_side),
+                @intCast(column / square_side),
+                digit,
+                &pending,
+            ) == .invalid) return .invalid;
 
             cell.* = backup;
             self.complete.set(index);
@@ -122,6 +146,52 @@ const Grid = struct {
             const next_index = pending.toggleFirstSet() orelse return .ok;
             index = @intCast(next_index);
         }
+    }
+
+    pub fn mark(self: *@This(), coord: Coord, digit: Digit) Status {
+        const index = coordToIndex(coord);
+        self.cells[index].set(digit);
+        self.complete.set(index);
+        return self.propagate(index);
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt; // autofix
+        _ = options; // autofix
+
+        try writer.writeAll(" ");
+        const offset = (digit_count + 1) / 2;
+        const pad = " " ** offset;
+        var i: u8 = 1;
+        for (0..square_side) |_| {
+            try writer.writeAll(" ");
+            for (0..square_side) |_| {
+                try writer.writeAll(pad);
+                try std.fmt.format(writer, "{}", .{i});
+                try writer.writeAll(pad[0 .. pad.len - 1]);
+                i += 1;
+            }
+        }
+        try writer.writeAll("\n");
+        const separator = " " ++ "-" ** ((digit_count + 1) * digit_count + 2 + square_side) ++ "\n";
+        var index: CellIndex = 0;
+        var row: u8 = 0;
+        for (0..square_side) |_| {
+            try writer.writeAll(separator);
+            for (0..square_side) |_| {
+                try std.fmt.format(writer, separator ++ "{c}", .{@as(u8, @intCast('A' + row))});
+                for (0..square_side) |_| {
+                    try writer.writeAll("|");
+                    for (0..square_side) |_| {
+                        try std.fmt.format(writer, "|{}", .{self.cells[index]});
+                        index += 1;
+                    }
+                }
+                try writer.writeAll("||\n");
+                row += 1;
+            }
+        }
+        try writer.writeAll(separator ++ separator);
     }
 };
 
@@ -190,4 +260,13 @@ fn setInitialGrid() void {
     const reader = buffered_stdin.reader();
     _ = reader; // autofix
 }
-pub fn main() void {}
+pub fn main() !void {
+    var a: Grid = .{};
+    for ([_]u8{ 0, 3, 5 }) |i| a.cells[30].possible.unset(i);
+    _ = a.mark(.{ .row = 1, .column = 3 }, 4);
+    const stdout = std.io.getStdOut();
+    var buffered = std.io.bufferedWriter(stdout.writer());
+    const writer = buffered.writer();
+    try std.fmt.format(writer, "{}", .{a});
+    try buffered.flush();
+}
