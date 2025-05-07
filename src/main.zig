@@ -220,7 +220,7 @@ const Grid = struct {
             }
             try writer.writeAll("\n");
         }
-        const separator = " " ++ "*" ** (cell_len * digit_count) ++ "\n";
+        const separator = " " ++ "*" ** (cell_len * digit_count + 1) ++ "\n";
         const writeRow = struct {
             fn writeRowCaption(w: anytype, row: u8) !void {
                 try std.fmt.format(
@@ -270,7 +270,8 @@ const GridChain = struct {
     const GridError = error{InvalidGrid};
     fn findNextGuess(grid: Grid) ?Grid.CellIndex {
         var it = grid.complete.iterator(.{ .kind = .unset });
-        return @intCast(it.next());
+        const result = it.next() orelse return null;
+        return @intCast(result);
     }
     pub fn compute(initial: Grid) GridError!Grid {
         var self: @This() = undefined;
@@ -286,14 +287,15 @@ const GridChain = struct {
                     // Everything is complete
                     return source_grid.grid;
                 const cell = &source_grid.grid.cells[source_grid.cell_index];
-                source_grid.digit = cell.possible.findFirstSet().?;
+                source_grid.digit = @intCast(cell.possible.findFirstSet().?);
                 guess_loop: while (true) {
                     guess_grid.grid = source_grid.grid;
                     switch (guess_grid.grid.set(source_grid.cell_index, source_grid.digit)) {
                         .invalid => {
                             switch (source_grid.ruleOut()) {
                                 .ok => {
-                                    source_grid.digit = cell.possible.findFirstSet() orelse continue :cell_loop;
+                                    const temp = cell.possible.findFirstSet() orelse continue :cell_loop;
+                                    source_grid.digit = @intCast(temp);
                                     continue :guess_loop;
                                 },
                                 .invalid => {
@@ -342,9 +344,9 @@ const Clue = struct {
 
     const RowError = error{InvalidRow};
     fn parseRow(letter: u8) RowError!Cell.Digit {
-        if (letter >= 'A' and letter < 'A' + Cell.last_digit)
+        if (letter >= 'A' and letter <= 'A' + Cell.last_digit)
             return @intCast(letter - 'A');
-        if (letter >= 'a' and letter < 'a' + Cell.last_digit)
+        if (letter >= 'a' and letter <= 'a' + Cell.last_digit)
             return @intCast(letter - 'a');
         return RowError.InvalidRow;
     }
@@ -407,6 +409,14 @@ fn setInitialGrid() !Grid {
 
 pub fn main() !void {
     const stdout = std.io.getStdOut();
+    const example_grid = comptime blk: {
+        var buffer: [512]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+        const writer = stream.writer();
+        std.fmt.format(writer, "{}", .{Grid{}}) catch unreachable;
+        break :blk buffer[0..stream.pos].*;
+    };
+    try stdout.writeAll("Pass clues in the format RowColumnNumber, like this: A12.\n" ++ example_grid ++ "\n");
     var buffered_stdout = std.io.bufferedWriter(stdout.writer());
     defer buffered_stdout.flush() catch {};
     const writer = buffered_stdout.writer();
@@ -418,8 +428,8 @@ pub fn main() !void {
         return err;
     };
     try std.fmt.format(writer, "Given grid:\n{}\n", .{initial_grid});
-    const final_grid = GridChain.compute() catch {
-        try std.fmt.format(writer, "There is no solution.", .{initial_grid});
+    const final_grid = GridChain.compute(initial_grid) catch {
+        try std.fmt.format(writer, "There is no solution.", .{});
         return;
     };
     try std.fmt.format(writer, "The solution is:\n{}", .{final_grid});
