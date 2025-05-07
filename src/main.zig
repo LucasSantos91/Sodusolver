@@ -1,5 +1,9 @@
 const std = @import("std");
+const build_params = @import("build_params");
 
+pub const std_options: std.Options = .{
+    .log_level = @enumFromInt(@intFromEnum(build_params.log_level)),
+};
 const Cell = struct {
     pub const digit_count = 9;
     pub const DigitCount = std.math.IntFittingRange(0, digit_count);
@@ -310,43 +314,65 @@ const GridChain = struct {
 
         grid_loop: while (true) {
             const source_grid = &guess[0];
-            logger.info("Current grid:\n{}", .{source_grid.grid});
+            logger.debug("Current grid:\n{e}", .{source_grid.grid});
             const guess_grid = &guess[1];
             cell_loop: while (true) {
-                source_grid.cell_index = findNextGuess(source_grid.grid) orelse
-                    // Everything is complete
+                source_grid.cell_index = findNextGuess(source_grid.grid) orelse {
+                    logger.info("Everything complete, success.", .{});
                     return source_grid.grid;
-                logger.info(
-                    "Evaluating cell: {}({})",
-                    .{ Grid.Coord.fromIndex(source_grid.cell_index), source_grid.cell_index },
-                );
+                };
                 const cell = &source_grid.grid.cells[source_grid.cell_index];
                 source_grid.digit = @intCast(cell.possible.findFirstSet().?);
                 guess_loop: while (true) {
+                    logger.info(
+                        "Evaluating cell {}({}): {}.",
+                        .{
+                            cell.*,
+                            source_grid.cell_index,
+                            source_grid.digit,
+                        },
+                    );
                     guess_grid.grid = source_grid.grid;
                     switch (guess_grid.grid.set(source_grid.cell_index, source_grid.digit)) {
                         .invalid => {
+                            logger.info("Invalid guess. Ruling out digit {} at cell {}.", .{ source_grid.digit, cell.* });
+                            logger.debug("State after guess:\n{e}", .{guess_grid.grid});
                             switch (source_grid.ruleOut()) {
                                 .ok => {
-                                    const temp = cell.possible.findFirstSet() orelse continue :cell_loop;
+                                    const temp = cell.possible.findFirstSet() orelse {
+                                        logger.info("No more guesses for cell {}.", .{cell.*});
+                                        continue :cell_loop;
+                                    };
                                     source_grid.digit = @intCast(temp);
                                     continue :guess_loop;
                                 },
                                 .invalid => {
-                                    // Backtrack
+                                    logger.info("Invalid grid. Starting backtracking.", .{});
                                     while (guess != limit) {
                                         guess -= 1;
                                         const previous_grid = &guess[0];
-                                        switch (previous_grid.ruleOut()) {
-                                            .ok => continue :grid_loop,
+                                        logger.debug("Backtracking to previous grid:\n{e}.", .{previous_grid.grid});
+                                        const rule_out_result = previous_grid.ruleOut();
+                                        logger.info("Ruling out previous guess: {}: {} -- status: {}.", .{
+                                            Grid.Coord.fromIndex(previous_grid.cell_index),
+                                            previous_grid.digit,
+                                            rule_out_result,
+                                        });
+                                        switch (rule_out_result) {
+                                            .ok => {
+                                                logger.info("Found previous good state. Finished backtracking.", .{});
+                                                continue :grid_loop;
+                                            },
                                             .invalid => {},
                                         }
                                     }
+                                    logger.info("Backtracked as far as possible. Invalid grid.", .{});
                                     return GridError.InvalidGrid;
                                 },
                             }
                         },
                         .ok => {
+                            logger.info("Guess is good so far, advancing.", .{});
                             guess += 1;
                             continue :grid_loop;
                         },
@@ -474,12 +500,9 @@ fn applyClues(initial_grid: Grid) GridChain.GridError!Grid {
     while (it.next()) |index| {
         const digit = initial_grid.cells[index].getValue();
         const status = result.set(@intCast(index), digit);
-        logger.info("Applying clue: {} -- status: {s}", .{
+        logger.info("Applying clue: {} -- status: {}", .{
             Clue{ .cell = Grid.Coord.fromIndex(@intCast(index)), .digit = digit },
-            switch (status) {
-                .ok => "success",
-                .invalid => "invalid",
-            },
+            status,
         });
         logger.debug("\n{e}", .{result});
         switch (status) {
@@ -505,15 +528,25 @@ pub fn main() !void {
     const writer = buffered_stdout.writer();
     const initial_grid = try parseInitialGrid();
     try std.fmt.format(writer, "Given grid:\n{}\n", .{initial_grid});
+    const Instant = std.time.Instant;
+    const backup_instant: Instant = .{ .timestamp = 0 };
+    const starting_time: Instant = Instant.now() catch backup_instant;
     const validated_grid = applyClues(initial_grid) catch |err| {
-        switch (err) {
-            GridChain.GridError.InvalidGrid => try writer.writeAll("\nNo solution for this grid."),
-        }
+        const finish_time: Instant = Instant.now() catch backup_instant;
+        const time_delta = finish_time.since(starting_time);
+        try std.fmt.format(writer, "There is no solution.\nTime taken: {} ms.", .{time_delta / std.time.ns_per_ms});
         return err;
     };
-    const final_grid = GridChain.compute(validated_grid) catch {
+    const final_grid_or_error = GridChain.compute(validated_grid);
+    const finish_time: Instant = Instant.now() catch backup_instant;
+    const result: GridChain.GridError!void = if (final_grid_or_error) |final_grid| {
+        try std.fmt.format(writer, "The solution is:\n{}", .{final_grid});
+    } else |e| blk: {
         try std.fmt.format(writer, "There is no solution.", .{});
-        return;
+        break :blk e;
     };
-    try std.fmt.format(writer, "The solution is:\n{}", .{final_grid});
+
+    const time_delta = finish_time.since(starting_time);
+    try std.fmt.format(writer, "\nTime taken: {} ms.", .{time_delta / std.time.ns_per_ms});
+    return result;
 }

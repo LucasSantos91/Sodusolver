@@ -8,11 +8,25 @@ pub fn build(b: *std.Build) void {
         "strip",
         "Whether to strip debug symbols",
     );
+    const log_level: std.log.Level = b.option(
+        std.log.Level,
+        "log-level",
+        "Log level",
+    ) orelse
+        if (optimize == .Debug)
+            .debug
+        else
+            .err;
+    const options = b.addOptions();
+    options.addOption(std.log.Level, "log_level", log_level);
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip,
+        .imports = &.{
+            .{ .name = "build_params", .module = options.createModule() },
+        },
     });
     const exe = b.addExecutable(.{
         .name = "Sodusolver",
